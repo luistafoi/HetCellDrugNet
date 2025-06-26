@@ -1,0 +1,62 @@
+{
+    "dataset": "CellDrugGene_HGB_Dataset_NoSplit_AugmentedNodes_v2",
+    "node.dat": {
+        "0": [
+            "cell",
+            884
+        ],
+        "1": [
+            "drug",
+            15515
+        ],
+        "2": [
+            "gene",
+            23470
+        ]
+    },
+    "link.dat": {
+        "0": [
+            "cell",
+            "drug",
+            "cell-drug_interaction",
+            4796347
+        ],
+        "1": [
+            "drug",
+            "cell",
+            "drug-cell_interaction_rev",
+            4796347
+        ],
+        "2": [
+            "cell",
+            "gene",
+            "cell-gene_expression",
+            16965577
+        ],
+        "3": [
+            "gene",
+            "cell",
+            "gene-cell_expressed_in_rev",
+            16965577
+        ],
+        "4": [
+            "drug",
+            "gene",
+            "drug-gene_target",
+            61615
+        ],
+        "5": [
+            "gene",
+            "drug",
+            "gene-targeted_by_drug_rev",
+            61615
+        ],
+        "6": [
+            "gene",
+            "gene",
+            "gene-interacts_gene",
+            665674
+        ]
+    },
+    "link.dat.test": {}
+}
