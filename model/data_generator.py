@@ -265,9 +265,12 @@ class input_data(object):
                             curNode_parsed = False
                             for mapped_type_id, mapped_type_name in sorted_node_types_by_name_len:
                                 if curNode.startswith(mapped_type_name):
+                                    # Defined with an underscore
                                     local_id_str_from_curNode = curNode[len(mapped_type_name):]
-                                    if local_id_str_fromCurNode.isdigit():
-                                        curNode_local_id = int(local_id_str_fromCurNode)
+                                    # USE the same name (with an underscore)
+                                    if local_id_str_from_curNode.isdigit():
+                                        # And USE it again here
+                                        curNode_local_id = int(local_id_str_from_curNode)
                                         curNodeType = mapped_type_id
                                         curNode_parsed = True
                                         break
@@ -330,59 +333,53 @@ class input_data(object):
         self.neigh_list_train = neigh_list_train
         print(f'Info: generate {file_} done.')
 
-
     def gen_het_w_walk(self, file_):
-        # This function assumes node_type 0 is the primary type for initiating walks
-        # And that self.node_type2name[0] and self.node_name2type are populated
-        primary_walk_node_type = 0 
-        if primary_walk_node_type not in self.node_type2name:
-            print(f"ERROR in gen_het_w_walk: Primary walk node type {primary_walk_node_type} not in self.node_type2name. Cannot generate walks.")
-            # Create an empty file or handle error appropriately
-            with open(file_, "w") as het_walk_f: # Create empty file
-                pass
-            print(f"Info: generated empty {file_} due to missing primary walk node type.")
-            return
-
-        print(f'Info: generate {file_} start, for primary node type {primary_walk_node_type} ({self.node_type2name[primary_walk_node_type]}).')
+        print(f'Info: generate {file_} start, for ALL node types.')
         het_walk_f = open(file_, "w")
         
-        if primary_walk_node_type not in self.node_n or self.node_n[primary_walk_node_type] == 0:
-            print(f"  Warning: No nodes of primary type {primary_walk_node_type} to start walks from.")
-        else:
-            for i in range(self.args.walk_n):
-                for n_id_local in range(self.node_n[primary_walk_node_type]): # n_id_local is local id for primary_walk_node_type
-                    if n_id_local >= len(self.neigh_list.get(primary_walk_node_type, [])): continue # Safety check
+        # --- NEW: Loop over every node type to start walks ---
+        for node_type in self.node_n.keys():
+            print(f"  Starting walks from node type: {node_type} ({self.node_type2name[node_type]})")
+            
+            # --- NEW: Loop over every node of that type ---
+            for n_id_local in range(self.node_n[node_type]):
+                # Start a fixed number of walks from this specific node
+                for i in range(self.args.walk_n):
+                    
+                    # Make sure the starting node has neighbors
+                    if n_id_local >= len(self.neigh_list.get(node_type, [])) or not self.neigh_list[node_type][n_id_local]:
+                        continue
 
-                    if len(self.neigh_list[primary_walk_node_type][n_id_local]): # If node has neighbors
-                        curNode = self.node_type2name[primary_walk_node_type] + str(n_id_local)
-                        curNodeType = primary_walk_node_type # Integer type
+                    curNode = self.node_type2name[node_type] + str(n_id_local)
+                    curNodeType = node_type
+                    
+                    current_walk = [curNode]
+                    for l_idx in range(self.args.walk_L - 1):
+                        # Robustly extract local ID string part
+                        current_node_type_prefix = self.node_type2name.get(curNodeType)
+                        if not current_node_type_prefix: break
                         
-                        current_walk = [curNode]
-                        for l_idx in range(self.args.walk_L - 1):
-                            # Robustly extract local ID string part
-                            current_node_type_prefix = self.node_type2name.get(curNodeType)
-                            if not current_node_type_prefix: break # Should not happen if types are consistent
-                            
-                            local_id_str_from_curNode = curNode.replace(current_node_type_prefix, "", 1)
-                            if not local_id_str_fromCurNode.isdigit(): break # Should be digits
-                            curNode_local_id = int(local_id_str_fromCurNode)
-
-                            if curNode_local_id >= len(self.neigh_list[curNodeType]): break # Out of bounds for this type's neighbor list
-                            if not self.neigh_list[curNodeType][curNode_local_id]: break # No neighbors to choose from
-
-                            curNode = random.choice(self.neigh_list[curNodeType][curNode_local_id]) # curNode is now a string like "gene42"
-                            current_walk.append(curNode)
-                            
-                            # Parse new curNode's type
-                            new_curNode_type_parsed = False
-                            for mapped_type_id, mapped_type_name in self.node_type2name.items():
-                                if curNode.startswith(mapped_type_name):
-                                    curNodeType = mapped_type_id # Update curNodeType to new int type
-                                    new_curNode_type_parsed = True
-                                    break
-                            if not new_curNode_type_parsed: break # Could not parse type from new curNode string
+                        local_id_str_from_curNode = curNode.replace(current_node_type_prefix, "", 1)
                         
-                        het_walk_f.write(" ".join(current_walk) + "\n")
+                        if not local_id_str_from_curNode.isdigit(): break
+                        curNode_local_id = int(local_id_str_from_curNode)
+
+                        if curNode_local_id >= len(self.neigh_list[curNodeType]) or not self.neigh_list[curNodeType][curNode_local_id]:
+                            break
+
+                        curNode = random.choice(self.neigh_list[curNodeType][curNode_local_id])
+                        current_walk.append(curNode)
+                        
+                        new_curNode_type_parsed = False
+                        for mapped_type_id, mapped_type_name in self.node_type2name.items():
+                            if curNode.startswith(mapped_type_name):
+                                curNodeType = mapped_type_id
+                                new_curNode_type_parsed = True
+                                break
+                        if not new_curNode_type_parsed: break
+                    
+                    het_walk_f.write(" ".join(current_walk) + "\n")
+
         het_walk_f.close()
         print(f'Info: generate {file_} done.')
 
@@ -492,41 +489,10 @@ class input_data(object):
         return sample_p
 
     def gen_embeds_w_neigh(self):
+        # This function now only needs to compute the sampling probabilities.
+        # The feature list/embedding layer is now handled directly inside the model.
         self.triple_sample_p = self.compute_sample_p()
-        # The following line is removed as it causes a KeyError when no features are present
-        # and its result is not used elsewhere in the function.
-        # active_node_types_with_features = list(self.dl.nodes['attr'].keys())
-        all_defined_node_types = list(self.node_type2name.keys()) # All types defined in info.dat
-
-        self.feature_list = dict()
-        for node_type_id in all_defined_node_types: # Iterate over all types we have names for
-            # Check if this type ID is recognized by the data_loader's count/attr structures
-            if node_type_id not in self.dl.nodes['count']:
-                print(f"  Warning: Node type {node_type_id} ('{self.node_type2name.get(node_type_id)}') from info.dat not in dl.nodes['count']. Skipping feature init.")
-                self.feature_list[node_type_id] = None # Or handle appropriately
-                continue
-
-            dim_for_type = self.node_n[node_type_id]
-            if dim_for_type == 0: # No nodes of this type
-                 self.feature_list[node_type_id] = None # Or an empty tensor of correct shape if required
-                 print(f"  Info: Node type {node_type_id} ('{self.node_type2name.get(node_type_id)}') has 0 nodes. No features generated.")
-                 continue
-
-            # Safely get node attributes only if they exist
-            node_attributes = self.dl.nodes.get('attr', {}).get(node_type_id)
-
-            if self.args.feat_type == 1 and isinstance(node_attributes, np.ndarray) and node_attributes.size > 0 :
-                print(f"  Info: Using provided continuous features for node type {node_type_id} ('{self.node_type2name.get(node_type_id)}')")
-                self.feature_list[node_type_id] = th.FloatTensor(node_attributes)
-            else: # Default to identity (binary) features if feat_type is not 1 or if attributes are missing/None
-                if self.args.feat_type == 1: # if feat_type was 1 but no features found
-                    print(f"  Warning: feat_type is {self.args.feat_type} for node type {node_type_id} but no continuous features found. Defaulting to identity matrix.")
-                
-                print(f"  Info: Using identity matrix for node type {node_type_id} ('{self.node_type2name.get(node_type_id)}')")
-                indices = np.vstack((np.arange(dim_for_type), np.arange(dim_for_type)))
-                indices = th.LongTensor(indices)
-                values = th.FloatTensor(np.ones(dim_for_type))
-                self.feature_list[node_type_id] = th.sparse_coo_tensor(indices, values, th.Size([dim_for_type, dim_for_type]))
+        print("Info: Triple sample probabilities computed. Feature embeddings will be handled by the model.")
 
 
     def sample_het_walk_triple(self):
