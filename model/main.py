@@ -19,32 +19,27 @@ os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
 
-def get_drug_cell_data_loader(dl, input_data, drug_type, cell_type, batch_size, device):
+def get_drug_cell_data_loader(dl, input_data, drug_type, cell_type, batch_size, device, max_samples=None):
     """
     Prepares a DataLoader for the drug-cell link prediction task for TRAINING.
+    Includes optional sub-sampling for faster epochs.
     """
     drug_type_id = input_data.node_name2type.get(drug_type)
     cell_type_id = input_data.node_name2type.get(cell_type)
 
-    if drug_type_id is None:
-        raise ValueError(f"Node type name '{drug_type}' not found in dataset's type mapping.")
-    if cell_type_id is None:
-        raise ValueError(f"Node type name '{cell_type}' not found in dataset's type mapping.")
+    if drug_type_id is None: raise ValueError(f"Node type name '{drug_type}' not found.")
+    if cell_type_id is None: raise ValueError(f"Node type name '{cell_type}' not found.")
 
     drug_cell_r_id = -1
     u_type_id, v_type_id = None, None
     for r_id, (s_type, d_type) in dl.links['meta'].items():
         if (s_type == drug_type_id and d_type == cell_type_id):
-            drug_cell_r_id = r_id
-            u_type_id, v_type_id = drug_type_id, cell_type_id
+            drug_cell_r_id, u_type_id, v_type_id = r_id, drug_type_id, cell_type_id
             break
         if (s_type == cell_type_id and d_type == drug_type_id):
-            drug_cell_r_id = r_id
-            u_type_id, v_type_id = cell_type_id, drug_type_id
+            drug_cell_r_id, u_type_id, v_type_id = r_id, cell_type_id, drug_type_id
             break
-    
-    if drug_cell_r_id == -1:
-        raise ValueError(f"Could not find a relation between '{drug_type}' and '{cell_type}' in the training data.")
+    if drug_cell_r_id == -1: raise ValueError(f"Could not find relation for '{drug_type}'-'{cell_type}'.")
 
     u_type_name = input_data.node_type2name[u_type_id]
     v_type_name = input_data.node_type2name[v_type_id]
@@ -52,17 +47,31 @@ def get_drug_cell_data_loader(dl, input_data, drug_type, cell_type, batch_size, 
     pos_links = dl.train_pos[drug_cell_r_id]
     neg_links = dl.train_neg[drug_cell_r_id]
 
-    u_nodes = pos_links[0] + neg_links[0]
-    v_nodes = pos_links[1] + neg_links[1]
-    labels = [1.0] * len(pos_links[0]) + [0.0] * len(neg_links[0])
+    u_nodes_pos_full, v_nodes_pos_full = pos_links[0], pos_links[1]
+    u_nodes_neg_full, v_nodes_neg_full = neg_links[0], neg_links[1]
 
-    # --- FIX: Move all tensors to the specified device ---
+    # --- NEW: Sub-sampling Logic ---
+    if max_samples and max_samples < (len(u_nodes_pos_full) + len(u_nodes_neg_full)):
+        num_pos = max_samples // 2
+        num_neg = max_samples - num_pos
+        
+        pos_indices = np.random.choice(len(u_nodes_pos_full), num_pos, replace=False)
+        neg_indices = np.random.choice(len(u_nodes_neg_full), num_neg, replace=False)
+
+        u_nodes = [u_nodes_pos_full[i] for i in pos_indices] + [u_nodes_neg_full[i] for i in neg_indices]
+        v_nodes = [v_nodes_pos_full[i] for i in pos_indices] + [v_nodes_neg_full[i] for i in neg_indices]
+        labels = [1.0] * num_pos + [0.0] * num_neg
+    else:
+        u_nodes = u_nodes_pos_full + u_nodes_neg_full
+        v_nodes = v_nodes_pos_full + v_nodes_neg_full
+        labels = [1.0] * len(u_nodes_pos_full) + [0.0] * len(u_nodes_neg_full)
+
     dataset = TensorDataset(
         torch.LongTensor(u_nodes).to(device),
         torch.LongTensor(v_nodes).to(device),
         torch.FloatTensor(labels).to(device)
     )
-    return DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=True), u_type_name, v_type_name
+    return DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=True, num_workers=0), u_type_name, v_type_name
 
 
 def get_validation_data_loader(dl, input_data, drug_type, cell_type, batch_size, device):
@@ -191,24 +200,19 @@ if __name__ == '__main__':
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(args.random_seed)
 
-    # --- 1. Load All Data ---
     data_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'data', args.data)
     dl = data_loader(data_path)
     input_data = data_generator.input_data(args, dl, temp_dir)
     
     het_neigh_train_f = os.path.join(temp_dir, 'het_neigh_train.txt')
     if not os.path.exists(het_neigh_train_f):
-        print(f"Generating training neighbors file: {het_neigh_train_f}")
         input_data.gen_het_w_walk_restart(het_neigh_train_f)
     else:
-        print(f"Loading existing training neighbors file: {het_neigh_train_f}")
-        # We need to load the file if it exists but is not yet in memory
         if not any(any(n_list for n_list in v) for v in input_data.neigh_list_train.values()):
             input_data.load_het_neigh_train(het_neigh_train_f)
 
     het_random_walk_f = os.path.join(temp_dir, 'het_random_walk.txt')
     if not os.path.exists(het_random_walk_f):
-        print(f"Generating random walk file: {het_random_walk_f}")
         input_data.gen_het_w_walk(het_random_walk_f)
     
     input_data.gen_embeds_w_neigh()
@@ -216,108 +220,93 @@ if __name__ == '__main__':
     drug_type_name = 'drug'
     cell_type_name = 'cell'
     
-    # --- 2. Prepare All DataLoaders (Train, Validation, Test) ---
-    lp_dataloader, u_type_lp, v_type_lp = get_drug_cell_data_loader(dl, input_data, drug_type_name, cell_type_name, args.mini_batch_s, device)
     valid_dataloader, u_type_valid, v_type_valid = get_validation_data_loader(dl, input_data, drug_type_name, cell_type_name, args.mini_batch_s, device)
     test_dataloader, u_type_test, v_type_test = get_test_data_loader(dl, input_data, drug_type_name, cell_type_name, args.mini_batch_s, device)
 
-    # --- 3. Initialize Model and Optimizer ---
     model = tools.HetAgg(args, dl=dl, input_data=input_data, device=device).to(device)
     model.init_weights()
     model.setup_link_prediction(drug_type_name=drug_type_name, cell_type_name=cell_type_name)
-    loss_wrapper = tools.MultiTaskLossWrapper(n_tasks=2).to(device)
-    optimizer = optim.Adam(itertools.chain(model.parameters(), loss_wrapper.parameters()), lr=args.lr, weight_decay=0)
     
-    # --- 4. Variables for Tracking Best Model ---
-    best_valid_auc = 0.0
-    best_epoch = 0
-    best_model_state = None
+    # Optimizer now only takes the model's parameters
+    optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=0)
+    
+    best_valid_auc, best_epoch, best_model_state = 0.0, 0, None
+    patience, patience_counter = 50, 0
 
     print('\n--- Starting End-to-End Multi-Task Training ---')
     for epoch in range(args.train_iter_n):
         model.train()
         print(f'\nINFO: Epoch {epoch+1} / {args.train_iter_n}')
-        
-        lp_iter = iter(lp_dataloader)
-        triple_list = input_data.sample_het_walk_triple()
-        
-        if not triple_list or not any(triple_list.values()):
-            print("Warning: No triples were sampled for this epoch. Skipping.")
-            continue
-            
-        batch_n = min(len(lp_dataloader), int(len(list(triple_list.values())[0]) / args.mini_batch_s))
-        if batch_n == 0:
-            print("Warning: Not enough data to create a single batch. Skipping epoch.")
-            continue
-        print(f'INFO: Processing {batch_n} batches for this epoch.')
 
-        # --- 1. Initialize accumulators for all losses ---
-        total_epoch_loss = 0.0
-        total_epoch_rw_loss = 0.0
-        total_epoch_lp_loss = 0.0
-
-        for k in range(batch_n):
+        # --- Phase 1: Link Prediction Training on a SUBSET of data ---
+        print("--- Phase 1: Training on Link Prediction ---")
+        # Create a new, smaller, random subset of data for each epoch.
+        # This makes each epoch much faster.
+        lp_dataloader, u_type_lp, v_type_lp = get_drug_cell_data_loader(
+            dl, input_data, drug_type_name, cell_type_name, args.mini_batch_s, device, max_samples=200000
+        )
+        
+        total_lp_loss = 0.0
+        for i, (u_nodes, v_nodes, labels) in enumerate(lp_dataloader):
             optimizer.zero_grad()
-
-            # --- Task A: Random Walk Loss ---
-            c_out_rw, p_out_rw, n_out_rw = [], [], []
-            for triple_pair in triple_list.keys():
-                triple_list_batch = triple_list[triple_pair][k * args.mini_batch_s: (k + 1) * args.mini_batch_s]
-                if not triple_list_batch: continue
-                c, p, n = model(triple_list_batch, triple_pair)
-                c_out_rw.append(c); p_out_rw.append(p); n_out_rw.append(n)
-            
-            if not c_out_rw: continue
-            loss_rw = tools.cross_entropy_loss(torch.cat(c_out_rw), torch.cat(p_out_rw), torch.cat(n_out_rw))
-            
-            # --- Task B: Link Prediction Loss ---
-            u_nodes, v_nodes, labels = next(lp_iter)
             loss_lp = model.link_prediction_loss(u_nodes, v_nodes, labels)
-            
-            # --- Combine, Backpropagate, and Accumulate ---
-            total_loss = loss_wrapper([loss_rw, loss_lp])
-            total_loss.backward()
+            loss_lp.backward()
             optimizer.step()
-
-            # --- 2. Accumulate all three loss values ---
-            total_epoch_loss += total_loss.item()
-            total_epoch_rw_loss += loss_rw.item()
-            total_epoch_lp_loss += loss_lp.item()
-
-            # Batch-level logging is still useful
-            weights = torch.exp(-loss_wrapper.log_vars).detach().cpu().numpy()
-            print(f"  Batch {k}/{batch_n} | Total Loss: {total_loss.item():.4f} | "
-                    f"RW Loss: {loss_rw.item():.4f} (w={weights[0]:.4f}) | "
-                    f"LP Loss: {loss_lp.item():.4f} (w={weights[1]:.4f})")
+            total_lp_loss += loss_lp.item()
         
-        # --- 3. Calculate and print all three average losses ---
-        avg_total = total_epoch_loss / batch_n
-        avg_rw = total_epoch_rw_loss / batch_n
-        avg_lp = total_epoch_lp_loss / batch_n
-        print(f"--- Epoch {epoch+1} Avg Loss: {avg_total:.4f} | Avg RW Loss: {avg_rw:.4f} | Avg LP Loss: {avg_lp:.4f} ---")
-        
-        # --- PERIODIC VALIDATION ---
+        if len(lp_dataloader) > 0:
+            print(f"  Avg Link Prediction Loss for Epoch: {total_lp_loss / len(lp_dataloader):.4f}")
+
+        # --- Phase 2: Self-Supervised Training ---
+        print("--- Phase 2: Training on Random Walks ---")
+        triple_list = input_data.sample_het_walk_triple()
+        if not triple_list or not any(triple_list.values()):
+            print("  Warning: No triples sampled for this phase. Skipping.")
+        else:
+            total_rw_loss = 0.0
+            num_rw_batches = 0
+            for triple_pair, triples in triple_list.items():
+                if not triples: continue
+                num_batches_for_pair = (len(triples) + args.mini_batch_s - 1) // args.mini_batch_s
+                for k in range(num_batches_for_pair):
+                    optimizer.zero_grad()
+                    triple_list_batch = triples[k * args.mini_batch_s: (k + 1) * args.mini_batch_s]
+                    c_embeds, p_embeds, n_embeds = model(triple_list_batch, triple_pair)
+                    loss_rw = tools.cross_entropy_loss(c_embeds, p_embeds, n_embeds)
+                    loss_rw.backward()
+                    optimizer.step()
+                    total_rw_loss += loss_rw.item()
+                    num_rw_batches += 1
+            
+            if num_rw_batches > 0:
+                print(f"  Avg Random Walk Loss for Epoch: {total_rw_loss / num_rw_batches:.4f}")
+
+        # --- Periodic Validation ---
         if (epoch + 1) % 5 == 0:
             print("--- Running Validation ---")
             valid_auc, valid_f1, valid_mrr = evaluate_model(model, valid_dataloader, u_type_valid, v_type_valid, drug_type_name, device)
             print(f"Validation Results | ROC-AUC: {valid_auc:.4f} | F1: {valid_f1:.4f} | MRR: {valid_mrr:.4f}")
 
             if valid_auc > best_valid_auc:
-                best_valid_auc = valid_auc
-                best_epoch = epoch + 1
+                best_valid_auc, best_epoch = valid_auc, epoch + 1
                 best_model_state = {k: v.cpu() for k, v in model.state_dict().items()}
+                patience_counter = 0
                 print(f"*** New best validation AUC found. Saving model state from epoch {best_epoch}. ***")
+            else:
+                patience_counter += 1
+                print(f"Validation AUC did not improve. Patience counter: {patience_counter}/{patience}")
+
+            if patience_counter >= patience:
+                print(f"Stopping early as validation has not improved for {patience*5} epochs.")
+                break
 
     print("\n--- Training Finished ---")
     
-    # --- 6. FINAL EVALUATION ON TEST SET ---
     print(f"\n--- Loading best model from epoch {best_epoch} (AUC: {best_valid_auc:.4f}) and running final evaluation on Test Set ---")
     if best_model_state:
         model.load_state_dict({k: v.to(device) for k, v in best_model_state.items()})
     else:
         print("Warning: No best model was saved. Evaluating the final model state.")
-        final_model_path = os.path.join(temp_dir, "final_model_state.pt")
-        torch.save(model.state_dict(), final_model_path)
 
     test_auc, test_f1, test_mrr = evaluate_model(model, test_dataloader, u_type_test, v_type_test, drug_type_name, device)
     print("\n--- Final Test Set Evaluation Results ---")
