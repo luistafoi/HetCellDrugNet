@@ -80,65 +80,99 @@ class HetAgg(nn.Module):
         local_indices_tensor = torch.LongTensor(local_id_batch).to(self.device)
         return self.feat_proj[str(node_type)](local_indices_tensor)
 
+
+# In model/tools.py, replace the entire old `node_het_agg` function with this one.
     def node_het_agg(self, id_batch_local, node_type):
+        """
+        Aggregates features for a batch of nodes of a specific type.
+        This version is robust to unseen nodes and uses correct ID mapping.
+        """
+        # Get the initial embeddings for the nodes in the current batch.
         current_embeds = self.conteng_agg(id_batch_local, node_type)
+        current_batch_size = len(id_batch_local)
+
+        # Process through each GNN layer
         for l in range(self.n_layers):
-            neigh_by_type = {nt: [] for nt in self.node_types}
-            for local_id in id_batch_local:
-                # Includes the permanent IndexError fix
-                neighbors_str = self.input_data.neigh_list_train[node_type][local_id] if local_id < len(self.input_data.neigh_list_train[node_type]) else []
-                node_neigh_by_type = {nt: [] for nt in self.node_types}
-                for neigh_str in neighbors_str:
-                    for nt_id, nt_name in self.input_data.node_type2name.items():
-                        if neigh_str.startswith(nt_name):
-                            n_local_id = int(neigh_str[len(nt_name):])
-                            n_global_id = n_local_id + self.dl.nodes['shift'][nt_id]
-                            node_neigh_by_type[nt_id].append(n_global_id)
-                            break
-                for nt_id in self.node_types:
-                    neighs = node_neigh_by_type[nt_id]
+            # This will hold the aggregated embeddings from each neighbor type
+            agg_batch = {}
+
+            # For each neighbor type, gather and process the neighbors
+            for nt_id in self.node_types:
+                
+                # 1. For each node in our batch, find its neighbors of type `nt_id`.
+                #    This list will hold the padded/sampled neighbor lists for the entire batch.
+                processed_neighbor_lists = []
+                for node_local_id in id_batch_local:
+                    
+                    # This is the critical safety check for test/validation nodes.
+                    # If a node's ID is outside the range of the pre-computed neighbor list,
+                    # treat it as having no neighbors.
+                    neighbors_str = []
+                    if node_local_id < len(self.input_data.neigh_list_train[node_type]):
+                        neighbors_str = self.input_data.neigh_list_train[node_type][node_local_id]
+
+                    # From the string neighbors, parse the local IDs of the correct type
+                    neighbors_local_ids = []
+                    neighbor_type_name_to_match = self.input_data.node_type2name[nt_id]
+                    for neigh_str in neighbors_str:
+                        if neigh_str.startswith(neighbor_type_name_to_match):
+                            try:
+                                # This correctly parses the local ID from strings like "gene123"
+                                neighbors_local_ids.append(int(neigh_str[len(neighbor_type_name_to_match):]))
+                            except (ValueError, IndexError):
+                                continue
+                    
+                    # 2. Pad or sample the neighbor list to a fixed size.
                     min_size = self.node_min_size[nt_id]
-                    if len(neighs) < min_size:
-                        num_to_pad = min_size - len(neighs)
+                    if len(neighbors_local_ids) < min_size:
                         num_nodes_of_neighbor_type = self.dl.nodes['count'][nt_id]
                         if num_nodes_of_neighbor_type > 0:
-                            padding_local_ids = [random.randint(0, num_nodes_of_neighbor_type - 1) for _ in range(num_to_pad)]
-                            padding_global_ids = [self.dl.nodes['shift'][nt_id] + l_id for l_id in padding_local_ids]
-                            neighs.extend(padding_global_ids)
-                    elif len(neighs) > min_size:
-                        neighs = random.sample(neighs, min_size)
-                    neigh_by_type[nt_id].append(neighs)
-            
-            agg_batch = {}
-            for nt_id in self.node_types:
-                flat_neighs_global = [item for sublist in neigh_by_type[nt_id] for item in sublist]
-                if not flat_neighs_global:
-                    agg_batch[nt_id] = torch.zeros(len(id_batch_local), self.embed_d).to(self.device)
-                    continue
-                flat_neighs_local = [self.dl.nodes['type_map'][g_idx][1] for g_idx in flat_neighs_global]
-                neigh_embeds = self.conteng_agg(flat_neighs_local, nt_id)
-                
-                # --- This is the key change: RESTORING the RNN aggregator ---
-                neigh_embeds = neigh_embeds.view(len(id_batch_local), self.node_min_size[nt_id], self.embed_d)
-                neigh_embeds = neigh_embeds.permute(1, 0, 2)
-                rnn = self.gnn_layers[l][f'rnn_{nt_id}']
-                all_states, _ = rnn(neigh_embeds)
-                agg_batch[nt_id] = torch.mean(all_states, 0)
+                            num_to_pad = min_size - len(neighbors_local_ids)
+                            padding = [random.randint(0, num_nodes_of_neighbor_type - 1) for _ in range(num_to_pad)]
+                            neighbors_local_ids.extend(padding)
+                    elif len(neighbors_local_ids) > min_size:
+                        neighbors_local_ids = random.sample(neighbors_local_ids, min_size)
+                    
+                    processed_neighbor_lists.append(neighbors_local_ids)
 
+                # 3. Aggregate the features of all neighbors in the batch.
+                flat_neighs_local = [item for sublist in processed_neighbor_lists for item in sublist]
+
+                if not flat_neighs_local:
+                    agg_batch[nt_id] = torch.zeros(current_batch_size, self.embed_d, device=self.device)
+                else:
+                    neigh_embeds = self.conteng_agg(flat_neighs_local, nt_id)
+                    
+                    # Reshape for RNN processing
+                    neigh_embeds = neigh_embeds.view(current_batch_size, self.node_min_size[nt_id], self.embed_d)
+                    neigh_embeds = neigh_embeds.permute(1, 0, 2)
+                    
+                    rnn = self.gnn_layers[l][f'rnn_{nt_id}']
+                    all_states, _ = rnn(neigh_embeds)
+                    
+                    # Average over the neighbors to get a single vector per node in the batch
+                    agg_batch[nt_id] = torch.mean(all_states, 0)
+
+            # 4. Use semantic attention to combine aggregated neighbor embeddings.
             c_agg_batch_prev_layer = current_embeds
             concat_embeds_list = [torch.cat((c_agg_batch_prev_layer, c_agg_batch_prev_layer), 1)]
             for nt_id in self.node_types:
                 concat_embeds_list.append(torch.cat((c_agg_batch_prev_layer, agg_batch[nt_id]), 1))
+            
             concat_embeds = torch.stack(concat_embeds_list, dim=1)
             sem_att = self.gnn_layers[l][f'sem_att_{node_type}']
             atten_w = sem_att(concat_embeds).squeeze(-1)
             atten_w = self.softmax(atten_w).unsqueeze(-1)
+            
             embeds_to_combine = [c_agg_batch_prev_layer] + [agg_batch[nt_id] for nt_id in self.node_types]
             embeds_to_combine = torch.stack(embeds_to_combine, dim=1)
+            
+            # Update the embeddings for the next layer
             current_embeds = torch.sum(atten_w * embeds_to_combine, dim=1)
             current_embeds = self.act(current_embeds)
+            
         return current_embeds
-
+    
     def het_agg(self, triple_pair, c_id_batch, pos_id_batch, neg_id_batch):
         c_agg = self.node_het_agg(c_id_batch, triple_pair[0])
         p_agg = self.node_het_agg(pos_id_batch, triple_pair[1])

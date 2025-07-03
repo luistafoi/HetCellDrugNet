@@ -110,78 +110,132 @@ def get_validation_data_loader(dl, input_data, drug_type, cell_type, batch_size,
     )
     return DataLoader(dataset, batch_size=batch_size, shuffle=False), u_type_name, v_type_name
 
-
 def get_test_data_loader(dl, input_data, drug_type, cell_type, batch_size, device):
-    """Prepares a DataLoader for the TEST set."""
+    """Prepares a DataLoader for the TEST set with robust data validation."""
     drug_type_id = input_data.node_name2type.get(drug_type)
     cell_type_id = input_data.node_name2type.get(cell_type)
     if drug_type_id is None or cell_type_id is None: raise ValueError("Test: Drug or cell type not found.")
 
+    # Find the relation ID for the drug-cell interaction
     drug_cell_r_id = -1
-    u_type_id, v_type_id = None, None
+    is_reversed = False # Flag to check if the relation in the file is (cell, drug)
     for r_id, (s_type, d_type) in dl.links_test['meta'].items():
         if (s_type == drug_type_id and d_type == cell_type_id):
             drug_cell_r_id = r_id
-            u_type_id, v_type_id = drug_type_id, cell_type_id
+            is_reversed = False
             break
         if (s_type == cell_type_id and d_type == drug_type_id):
             drug_cell_r_id = r_id
-            u_type_id, v_type_id = cell_type_id, drug_type_id
+            is_reversed = True
+            print("INFO: Test relation is in (cell, drug) order. Loader will swap them correctly.")
             break
     
     if drug_cell_r_id == -1: raise ValueError("Test relation not found.")
-    u_type_name = input_data.node_type2name[u_type_id]
-    v_type_name = input_data.node_type2name[v_type_id]
     
+    drug_nodes, cell_nodes, labels = [], [], []
+    
+    # --- Process Positive Links ---
     pos_links_matrix = dl.links_test['data'][drug_cell_r_id]
     pos_rows, pos_cols = pos_links_matrix.nonzero()
-    neg_links = dl.test_neg.get(drug_cell_r_id, [[], []])
-    u_nodes = list(pos_rows) + neg_links[0]
-    v_nodes = list(pos_cols) + neg_links[1]
-    labels = [1.0] * len(pos_rows) + [0.0] * len(neg_links[0])
+    print(f"INFO: Processing {len(pos_rows)} positive test links.")
     
-    # --- FIX: Move all tensors to the specified device ---
+    # The model's link_prediction_forward always expects (drug, cell) order.
+    # We must ensure the lists are populated correctly regardless of the file's order.
+    if is_reversed:
+        # The file has (cell, drug), so rows are cells and cols are drugs.
+        cell_nodes.extend(list(pos_rows))
+        drug_nodes.extend(list(pos_cols))
+    else:
+        # The file has (drug, cell), so rows are drugs and cols are cells.
+        drug_nodes.extend(list(pos_rows))
+        cell_nodes.extend(list(pos_cols))
+    labels.extend([1.0] * len(pos_rows))
+
+    # --- Process Negative Links ---
+    neg_links = dl.test_neg.get(drug_cell_r_id, [[], []])
+    neg_u, neg_v = neg_links[0], neg_links[1] # u corresponds to rows, v to cols
+    print(f"INFO: Processing {len(neg_u)} negative test links.")
+
+    if is_reversed:
+        # Negative samples were generated for (cell, drug), so u are cells, v are drugs.
+        cell_nodes.extend(neg_u)
+        drug_nodes.extend(neg_v)
+    else:
+        # Negative samples were generated for (drug, cell), so u are drugs, v are cells.
+        drug_nodes.extend(neg_u)
+        cell_nodes.extend(neg_v)
+    labels.extend([0.0] * len(neg_u))
+
+    print(f"INFO: Total test samples prepared: {len(labels)}")
+    
+    # The model expects (drug, cell), so we pass drug_nodes as the first tensor
+    # and cell_nodes as the second.
     dataset = TensorDataset(
-        torch.LongTensor(u_nodes).to(device),
-        torch.LongTensor(v_nodes).to(device),
+        torch.LongTensor(drug_nodes).to(device),
+        torch.LongTensor(cell_nodes).to(device),
         torch.FloatTensor(labels).to(device)
     )
-    return DataLoader(dataset, batch_size=batch_size, shuffle=False), u_type_name, v_type_name
-
-
-def calculate_mrr(preds, labels):
-    """Calculates the Mean Reciprocal Rank (MRR)."""
-    if len(labels) == 0 or sum(labels) == 0:
-        return 0.0
-    sorted_results = sorted(zip(preds, labels), key=lambda x: x[0], reverse=True)
-    rank = 0
-    for i, (pred, label) in enumerate(sorted_results):
-        if label == 1:
-            rank = i + 1
-            break
-    return 1.0 / rank if rank > 0 else 0.0
-
+    
+    # Return the type names in the order the model expects.
+    return DataLoader(dataset, batch_size=batch_size, shuffle=False), drug_type, cell_type
 
 def evaluate_model(model, dataloader, u_type_eval, v_type_eval, drug_type_name, device):
+    """Evaluates the model on a given dataloader and returns performance metrics."""
     model.eval()
     all_preds = []
     all_labels = []
-    with torch.no_grad():
-        # The u_nodes and v_nodes tensors are already on the GPU now
-        for u_nodes, v_nodes, labels in dataloader:
-            preds = model.link_prediction_forward(u_nodes, v_nodes)
-            all_preds.extend(preds.cpu().numpy())
-            all_labels.extend(labels.cpu().numpy()) # labels is also on the GPU, so .cpu() is good practice here
     
+    # A dictionary to group predictions by their head node for MRR
+    # It will look like: { head_node_id: [ (pred_score, label), ... ], ... }
+    preds_by_head = {}
+
+    with torch.no_grad():
+        for u_nodes_batch, v_nodes_batch, labels_batch in dataloader:
+            u_nodes = u_nodes_batch.to(device)
+            v_nodes = v_nodes_batch.to(device)
+            labels = labels_batch.to(device)
+
+            preds = model.link_prediction_forward(u_nodes, v_nodes)
+            
+            # Store predictions and labels for overall AUC and F1
+            all_preds.extend(preds.cpu().numpy())
+            all_labels.extend(labels.cpu().numpy())
+            
+            # Group predictions and labels by head node for MRR calculation
+            head_nodes = u_nodes.cpu().numpy()
+            batch_preds = preds.cpu().numpy()
+            batch_labels = labels.cpu().numpy()
+
+            for i in range(len(head_nodes)):
+                head_id = head_nodes[i]
+                if head_id not in preds_by_head:
+                    preds_by_head[head_id] = []
+                preds_by_head[head_id].append( (batch_preds[i], batch_labels[i]) )
+
+    # --- Calculate overall metrics ---
     if len(all_labels) == 0 or len(np.unique(all_labels)) < 2:
         return 0.0, 0.0, 0.0
         
     roc_auc = roc_auc_score(all_labels, all_preds)
     f1 = f1_score(np.array(all_labels), np.array(all_preds) > 0.5)
-    mrr = calculate_mrr(all_preds, all_labels)
+    
+    # --- Calculate true Mean Reciprocal Rank (MRR) ---
+    reciprocal_ranks = []
+    for head_id, predictions in preds_by_head.items():
+        # Only consider queries that have at least one true positive link
+        if any(label == 1 for score, label in predictions):
+            # Sort predictions for this head node by score, descending
+            predictions.sort(key=lambda x: x[0], reverse=True)
+            
+            # Find the rank of the first true positive
+            for rank, (score, label) in enumerate(predictions):
+                if label == 1:
+                    reciprocal_ranks.append(1.0 / (rank + 1))
+                    break # Move to the next head node
+    
+    mrr = np.mean(reciprocal_ranks) if reciprocal_ranks else 0.0
     
     return roc_auc, f1, mrr
-
 
 if __name__ == '__main__':
     args = read_args()
