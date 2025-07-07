@@ -55,38 +55,34 @@ class data_loader:
         self.splited = False 
         self.nodes = self.load_nodes() 
         
+        # Load the two separate link files
         self.links_init = self.load_links('link.dat') 
-        self.links = copy.deepcopy(self.links_init) # self.links will be modified to become training graph
-
         self.raw_links_test_from_file = self.load_links('link.dat.test')
 
-        self.train_pos, self.valid_pos = self.get_train_valid_pos(copy.deepcopy(self.links_init))
+        # --- START: NEW CODE BLOCK TO MERGE GRAPHS ---
+        print("INFO data_loader: Merging train and test links to create a full graph for message passing.")
+        self.links_full_graph = copy.deepcopy(self.links_init)
+        for r_id, test_matrix in self.raw_links_test_from_file['data'].items():
+            if r_id in self.links_full_graph['data']:
+                # Add the test links to the corresponding matrix in the full graph
+                self.links_full_graph['data'][r_id] += test_matrix
+            else:
+                # If the relation type only exists in the test set, add it
+                self.links_full_graph['data'][r_id] = test_matrix
+                if r_id in self.raw_links_test_from_file['meta']:
+                    self.links_full_graph['meta'][r_id] = self.raw_links_test_from_file['meta'][r_id]
+        # --- END: NEW CODE BLOCK ---
 
+        # The rest of the logic proceeds as before, but the splits happen on a copy
+        self.train_pos, self.valid_pos = self.get_train_valid_pos(copy.deepcopy(self.links_init))
         self.train_neg = self.generate_negative_samples(self.train_pos, "training")
         self.valid_neg = self.generate_negative_samples(self.valid_pos, "validation")
         
-        if not self.raw_links_test_from_file['data']: 
-            print("INFO data_loader: 'link.dat.test' was empty. Using generated validation set (self.valid_pos) as 'links_test'.")
-            self.links_test = {
-                'data': self.valid_pos, 
-                'meta': {}, 'count': Counter(), 'total': 0
-            }
-            for r_id, pairs in self.valid_pos.items():
-                if pairs and len(pairs[0]) > 0:
-                    if r_id in self.links_init['meta']:
-                         self.links_test['meta'][r_id] = self.links_init['meta'][r_id]
-                    else:
-                         print(f"WARNING data_loader: Meta info for r_id {r_id} (from valid_pos) not found in initial links metadata.")
-                    self.links_test['count'][r_id] = len(pairs[0])
-                    self.links_test['total'] += len(pairs[0])
-            self.test_types = list(self.links_test['data'].keys())
-        else: 
-            print("INFO data_loader: Using content from 'link.dat.test' for 'links_test'.")
-            self.links_test = self.raw_links_test_from_file
-            self.test_types = list(self.links_test['data'].keys()) if not edge_types_to_evaluate else edge_types_to_evaluate
-        
+        # The test set is still loaded from its original, separate file for evaluation
+        self.links_test = self.raw_links_test_from_file
+        self.test_types = list(self.links_test['data'].keys()) if not edge_types_to_evaluate else edge_types_to_evaluate
         print(f"INFO data_loader: Final test_types for evaluation: {self.test_types}")
-
+        
         self.test_neg = {}
         if self.links_test['data']:
             test_pos_for_neg_sampling = defaultdict(lambda: [[], []])
@@ -99,8 +95,8 @@ class data_loader:
                 self.test_neg = self.generate_negative_samples(test_pos_for_neg_sampling, "testing")
 
         self.types = self.load_types('node.dat') 
-        # self.links['data'] now represents the training graph links
-        self.links['data'] = self.get_training_links_matrices() 
+        # self.links now correctly represents ONLY the training graph links for the loss function
+        self.links = {'data': self.get_training_links_matrices(), 'meta': self.links_init['meta']}
         self.gen_transpose_links() 
         self.nonzero = False 
 

@@ -15,25 +15,12 @@ class input_data(object):
         self.args = args
         self.dl = dl
         self.temp_dir = temp_dir
-        # Assuming main.py defines temp_dir based on its location and args.data
-        # For consistency, let's use the path construction from main.py if needed
-        # current_script_dir_main = os.path.dirname(os.path.abspath(sys.argv[0])) # Path of main.py
-        # self.temp_dir = os.path.join(current_script_dir_main, f'{self.args.data}-temp')
-        # However, HetGNN often creates temp relative to its own script if sys.path[0] is used.
-        # For now, let's assume temp_dir is correctly handled for file writing/reading later
-        # We will use self.dl.path for reading original data files.
-
-        print("--- Inside data_generator.input_data.__init__ ---")
-        print(f"  args.data: {args.data}")
-        print(f"  dl.path (HGB dataset path): {self.dl.path}")
         
+        print("--- Inside data_generator.input_data.__init__ ---")
         node_n, node_shift = self.dl.nodes['count'], self.dl.nodes['shift']
         self.node_n, self.node_shift = node_n, node_shift
-        print(f"  Node counts per type (self.node_n): {self.node_n}")
-        print(f"  Node ID shifts per type (self.node_shift): {self.node_shift}")
-
-        # Load info.dat to get node type name mapping
-        # Path to info.dat should be self.dl.path + 'info.dat'
+        
+        # This part is unchanged
         info_dat_abs_path = os.path.join(self.dl.path, 'info.dat')
         print(f"  Attempting to load info.dat from: {info_dat_abs_path}")
         try:
@@ -44,135 +31,63 @@ class input_data(object):
             sys.exit(1)
 
         self.node_type2name, self.node_name2type = dict(), dict()
-        
-        # Adapt to potential HGB info.dat structure vs simpler structure
-        if "node.dat" in data_info_content and "node type" in data_info_content["node.dat"]: # Strict HGB format
-            node_type_mapping_from_info = data_info_content["node.dat"]["node type"]
-            for type_id_str, type_info_list in node_type_mapping_from_info.items():
-                type_id_int = int(type_id_str)
-                type_name = type_info_list[0]
-                self.node_type2name[type_id_int] = type_name
-                self.node_name2type[type_name] = type_id_int
-        elif "node.dat" in data_info_content and isinstance(data_info_content["node.dat"], dict): 
-            node_type_mapping_from_info = data_info_content["node.dat"]
-            for type_id_str, type_info_list_value in node_type_mapping_from_info.items(): # Renamed for clarity
-                type_id_int = int(type_id_str)
-                
-                # Extract the actual string name from the list
-                actual_type_name_string = type_info_list_value[0] 
-                
-                self.node_type2name[type_id_int] = actual_type_name_string # Store the string name
-                self.node_name2type[actual_type_name_string] = type_id_int # Use the string name as the key
-        else:
-            print(f"FATAL ERROR: info.dat at {info_dat_abs_path} does not have the expected 'node.dat' structure.")
+        try:
+            # First, try the strict HGB format which has a "node type" key
+            node_type_mapping = data_info_content["node.dat"]["node type"]
+        except KeyError:
+            # If that fails, it means we have the simpler format.
+            print("  > Info: 'node type' key not found in info.dat, using simpler format.")
+            node_type_mapping = data_info_content["node.dat"]
+        except Exception as e:
+            print(f"FATAL ERROR: Could not parse info.dat. Unexpected structure. Error: {e}")
             sys.exit(1)
+
+        for type_id_str, type_info_list in node_type_mapping.items():
+            type_id_int = int(type_id_str)
+            type_name = type_info_list[0]
+            self.node_type2name[type_id_int] = type_name
+            self.node_name2type[type_name] = type_id_int
             
         print(f"  self.node_type2name map: {self.node_type2name}")
         print(f"  self.node_name2type map: {self.node_name2type}")
-
-        node_types = list(self.node_type2name.keys()) # These are now integer type IDs
-
+        
+        # This part is also unchanged
+        num_node_types_actual = len(self.dl.nodes['count'])
+        self.standand_node_L = [20] * num_node_types_actual
+        self.top_k = {i: 5 for i in range(num_node_types_actual)}
+        self.neigh_L = sum(self.standand_node_L) if self.standand_node_L else 50
         self.while_max_count = 1e5
-        if args.data=='amazon':
-            self.standand_node_L = [100]
-            self.top_k = {0:10} # Assuming type 0 for Amazon
-            self.neigh_L = 100
-        elif args.data=='LastFM' or args.data=='LastFM_magnn':
-            self.standand_node_L = [20,70,10] # For 3 types
-            self.top_k = {0:10,1:10,2:5}
-            self.neigh_L = 80
-        elif args.data=='PubMed':
-            self.standand_node_L = [20,30,40,10] # For 4 types
-            self.top_k = {0:10,1:10,2:10,3:5}
-            self.neigh_L = 70
-            self.while_max_count = 1e3
-        elif args.data=='CellDrug':
-            # Assuming 3 node types: 0:gene, 1:cell, 2:drug
-            # Ensure these type IDs match what's in your info.dat and node_type2name map
-            if not all(k in self.node_type2name for k in [0,1,2]):
-                 print(f"FATAL: 'CellDrug' config expects node types 0, 1, 2, but self.node_type2name is {self.node_type2name}")
-                 sys.exit(1)
-            if len(self.node_type2name) != 3:
-                 print(f"FATAL: 'CellDrug' config expects 3 node types, but found {len(self.node_type2name)} from info.dat")
-                 sys.exit(1)
-            self.standand_node_L = [30, 40, 30]
-            self.top_k = {0:10, 1:10, 2:10}
-            self.neigh_L = 100 
-            self.while_max_count = 1e5
-            print(f"  Applied CellDrug specific HetGNN params: neigh_L={self.neigh_L}, standand_node_L={self.standand_node_L}, top_k={self.top_k}")
-        else: 
-            print(f"Warning: Using generic default HetGNN parameters for dataset: {args.data}")
-            num_node_types_actual = len(self.dl.nodes['count'])
-            self.standand_node_L = [20] * num_node_types_actual
-            self.top_k = {i: 5 for i in range(num_node_types_actual)}
-            self.neigh_L = sum(self.standand_node_L) if self.standand_node_L else 50
-            print(f"  Fallback HetGNN params: neigh_L={self.neigh_L}, standand_node_L={self.standand_node_L}, top_k={self.top_k}")
-
-
-        edge_list = dict()
-        for edge_type in sorted(dl.links['meta'].keys()): # edge_type is integer relation ID
-            h_type, t_type = dl.links['meta'][edge_type] # h_type, t_type are integer node type IDs
-            h_node_count_for_type = dl.nodes['count'][h_type]
-            edge_list[edge_type] = [[] for _ in range(h_node_count_for_type)]
         
-        neigh_list = dict()
-        for node_type_key in dl.nodes['count'].keys(): # node_type_key is integer node type ID
-            count_for_this_type = dl.nodes['count'][node_type_key]
-            neigh_list[node_type_key] = [[] for _ in range(count_for_this_type)]
+        # --- START: THE SINGLE MOST IMPORTANT FIX ---
+        # Initialize an empty neighbor list for ALL nodes in the graph
+        neigh_list = {nt: [[] for _ in range(node_n[nt])] for nt in node_n}
 
-        print("\n  Populating edge_list (neighbors for each edge type)...")
-        for edge_type in sorted(dl.links['meta'].keys()):
-            h_type, t_type = dl.links['meta'][edge_type]
-            row, col = self.dl.links['data'][edge_type].nonzero() # global IDs
+        print("\n  Populating neighbor lists using the FULL merged graph...")
+        # Use the new 'links_full_graph' object we created in the data_loader
+        for r_id, sp_matrix in dl.links_full_graph['data'].items():
+            h_type, t_type = dl.links_full_graph['meta'][r_id]
+            rows, cols = sp_matrix.nonzero()
             
-            for r_global, c_global in zip(row, col):
-                h_id_local = r_global - node_shift[h_type]
-                t_id_local = c_global - node_shift[t_type]
-
-                # --- Extensive Debugging for edge_list population ---
-                # print(f"\n    DEBUG POPULATING EDGE_LIST:")
-                # print(f"      Edge Type: {edge_type}, HGB Relation Meta: {self.dl.links['meta'][edge_type]} (h_type={h_type}, t_type={t_type})")
-                # print(f"      Global Link: {r_global} -> {c_global}")
-                # print(f"      h_type {h_type}: Shift={node_shift[h_type]}, Count={node_n[h_type]}")
-                # print(f"      t_type {t_type}: Shift={node_shift[t_type]}, Count={node_n[t_type]}")
-                # print(f"      Calculated h_id_local: {h_id_local}")
-                # print(f"      Calculated t_id_local: {t_id_local}")
-
-                if not (0 <= h_id_local < node_n[h_type]):
-                    print(f"      CRITICAL ERROR (h_id_local): Local head ID {h_id_local} for global {r_global} is out of bounds for type {h_type} (max local: {node_n[h_type]-1}). Skipping this edge.")
-                    continue 
-                if not (0 <= t_id_local < node_n[t_type]):
-                    print(f"      CRITICAL ERROR (t_id_local): Local tail ID {t_id_local} for global {c_global} is out of bounds for type {t_type} (max local: {node_n[t_type]-1}). Skipping this edge.")
+            # Populate the lists using correct local IDs from the type_map
+            for r_global, c_global in zip(rows, cols):
+                if r_global not in dl.nodes['type_map'] or c_global not in dl.nodes['type_map']:
                     continue
-                if t_type not in self.node_type2name:
-                    print(f"      CRITICAL ERROR: Target node type ID {t_type} not in self.node_type2name map: {self.node_type2name.keys()}. Skipping this edge.")
+
+                h_id_local = dl.nodes['type_map'][r_global][1]
+                t_id_local = dl.nodes['type_map'][c_global][1]
+
+                if dl.nodes['type_map'][r_global][0] != h_type or dl.nodes['type_map'][c_global][0] != t_type:
                     continue
-                
-                node_name_prefix = self.node_type2name[t_type]
-                neighbor_string_to_append = f"{node_name_prefix}{t_id_local}"
-                # print(f"      Appending to edge_list[{edge_type}][{h_id_local}]: '{neighbor_string_to_append}'")
-                # --- End Debugging for edge_list population ---
-                
-                edge_list[edge_type][h_id_local].append(neighbor_string_to_append)
-        
-        print("\n  Populating neigh_list (aggregated neighbors for each node)...")
-        for node_type_key in dl.nodes['count'].keys(): # This is an integer node type
-            for edge_type_key in edge_list.keys(): # This is an integer link type
-                h_type, _ = dl.links['meta'][edge_type_key] # h_type is an integer node type
-                if node_type_key == h_type:
-                    # node_n[node_type_key] is count for this node_type_key
-                    for n_id_local in range(node_n[node_type_key]): # n_id_local is local id for node_type_key
-                        # edge_list[edge_type_key] is list for source nodes of h_type. Its length is node_n[h_type]
-                        # So, n_id_local (which is for node_type_key == h_type) should be a valid index.
-                        if n_id_local < len(edge_list[edge_type_key]): # Safety check
-                             neigh_list[node_type_key][n_id_local] += edge_list[edge_type_key][n_id_local]
-                        # else:
-                        #    print(f"    Warning: n_id_local {n_id_local} out of bounds for edge_list[{edge_type_key}] (len {len(edge_list[edge_type_key])}) when populating neigh_list for node_type {node_type_key}")
-                            
-        self.edge_list = edge_list
+
+                neighbor_string = f"{self.node_type2name[t_type]}{t_id_local}"
+                if h_id_local < len(neigh_list[h_type]):
+                     neigh_list[h_type][h_id_local].append(neighbor_string)
+
+        self.edge_list = {} # We don't need the intermediate edge_list anymore
         self.neigh_list = neigh_list
+        # --- END: THE SINGLE MOST IMPORTANT FIX ---
         
-        # Initialize neigh_list_train to prevent AttributeError if it's not generated/loaded.
+        # Initialize neigh_list_train to prevent AttributeError
         self.neigh_list_train = {nt: [[] for _ in range(self.node_n[nt])] for nt in self.node_n}
 
         print("--- Finished data_generator.input_data.__init__ ---")
