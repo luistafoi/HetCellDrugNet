@@ -1,0 +1,13 @@
+# Python Caches
+__pycache__/
+*.pyc
+
+# Data, Temp, and Output Files
+data/
+model/*-temp/
+model/embeddings/
+*.csv
+*.txt
+*.npy
+*.pdf
+*.html
