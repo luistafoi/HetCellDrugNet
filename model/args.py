@@ -3,6 +3,10 @@ import argparse
 
 def read_args():
     parser = argparse.ArgumentParser()
+    parser.add_argument('--weight_decay', type=float, default=0,
+                        help='Adam optimizer weight decay')
+    parser.add_argument('--isolation_ratio', type=float, default=0.15,
+                        help='Fraction of cells to isolate during training')
     parser.add_argument('--data', type=str, default='amazon',
                         help='select data path')
     parser.add_argument('--model_path', type=str, default='../model_save/',

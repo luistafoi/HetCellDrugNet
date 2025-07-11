@@ -61,18 +61,103 @@ class HetAgg(nn.Module):
     def setup_link_prediction(self, drug_type_name: str, cell_type_name: str):
         self.drug_type_name = drug_type_name
         self.cell_type_name = cell_type_name
-        self.lp_bilinear = nn.Bilinear(self.embed_d, self.embed_d, 1).to(self.device)
+        # self.lp_bilinear = nn.Bilinear(self.embed_d, self.embed_d, 1).to(self.device) (this is the original line)
+        # The new dimension is doubled to account for the concatenation
+        self.lp_bilinear = nn.Bilinear(self.embed_d * 2, self.embed_d * 2, 1).to(self.device) #for skip conncection
         print(f"INFO: Setup link prediction head for drug ('{drug_type_name}') and cell ('{cell_type_name}').")
 
+    #this function is used to get both the initial and final embeddings for skip connection
+    def get_combined_embedding(self, id_batch_local, node_type):
+            """
+            Gets both the initial and final (post-GNN) embeddings and concatenates them.
+            """
+            # 1. Get initial embeddings (before message passing)
+            initial_embeds = self.conteng_agg(id_batch_local, node_type)
+
+            # 2. Get final embeddings (after message passing)
+            final_embeds = self.node_het_agg(id_batch_local, node_type)
+
+            # 3. Concatenate them side-by-side
+            return torch.cat([initial_embeds, final_embeds], dim=1)
+
+    # def link_prediction_loss(self, drug_indices_global, cell_indices_global, labels, isolation_ratio=0.0):
+    #     """
+    #     Calculates link prediction loss. A fraction of cells can be "isolated"
+    #     to have their embeddings generated without message passing.
+    #     """
+    #     drug_type_id = self.input_data.node_name2type[self.drug_type_name]
+    #     cell_type_id = self.input_data.node_name2type[self.cell_type_name]
+
+    #     # --- Get drug embeddings using full GNN message passing ---
+    #     drug_indices_local = [self.dl.nodes['type_map'][g_idx][1] for g_idx in drug_indices_global.tolist()]
+    #     drug_embeds = self.node_het_agg(drug_indices_local, drug_type_id)
+
+    #     # --- Get cell embeddings with the new isolation logic ---
+    #     cell_indices_local = torch.tensor(
+    #         [self.dl.nodes['type_map'][g_idx][1] for g_idx in cell_indices_global.tolist()],
+    #         device=self.device
+    #     )
+        
+    #     batch_size = len(cell_indices_local)
+    #     final_cell_embeds = torch.zeros(batch_size, self.embed_d, device=self.device)
+
+    #     # Create a random mask to decide which cells to isolate
+    #     should_isolate = torch.rand(batch_size, device=self.device) < isolation_ratio
+        
+    #     # --- NEW: Print statement to verify the isolation ---
+    #     num_isolated = should_isolate.sum().item()
+    #     if num_isolated > 0:
+    #         print(f"    > Isolating {num_isolated} / {batch_size} cells for this batch ({num_isolated/batch_size*100:.1f}%)")
+        
+    #     # --- A. For cells that ARE connected to the graph (most of them) ---
+    #     graph_connected_mask = ~should_isolate
+    #     if graph_connected_mask.any():
+    #         graph_cell_indices = cell_indices_local[graph_connected_mask].tolist()
+    #         graph_cell_embeds = self.node_het_agg(graph_cell_indices, cell_type_id)
+    #         final_cell_embeds[graph_connected_mask] = graph_cell_embeds
+
+    #     # --- B. For cells that are "isolated" (a small fraction) ---
+    #     if should_isolate.any():
+    #         isolated_cell_indices = cell_indices_local[should_isolate].tolist()
+    #         isolated_cell_embeds = self.conteng_agg(isolated_cell_indices, cell_type_id)
+    #         final_cell_embeds[should_isolate] = isolated_cell_embeds
+            
+    #     # --- Calculate loss as before, using the combined embeddings ---
+    #     scores = self.lp_bilinear(drug_embeds, final_cell_embeds).squeeze(-1)
+    #     return F.binary_cross_entropy_with_logits(scores, labels.float())
+
+    # def link_prediction_loss(self, drug_indices_global, cell_indices_global, labels): #This is the original function no isolation no nothing
+    #     """
+    #     Calculates link prediction loss using the standard GNN embeddings.
+    #     """
+    #     drug_type_id = self.input_data.node_name2type[self.drug_type_name]
+    #     cell_type_id = self.input_data.node_name2type[self.cell_type_name]
+
+    #     # Get local indices for both drugs and cells
+    #     drug_indices_local = [self.dl.nodes['type_map'][g_idx][1] for g_idx in drug_indices_global.tolist()]
+    #     cell_indices_local = [self.dl.nodes['type_map'][g_idx][1] for g_idx in cell_indices_global.tolist()]
+
+    #     # Get final embeddings for both using the full GNN message passing
+    #     drug_embeds = self.node_het_agg(drug_indices_local, drug_type_id)
+    #     cell_embeds = self.node_het_agg(cell_indices_local, cell_type_id)
+
+    #     # Calculate loss using the bilinear layer
+    #     scores = self.lp_bilinear(drug_embeds, cell_embeds).squeeze(-1)
+    #     return F.binary_cross_entropy_with_logits(scores, labels.float())
+
     def link_prediction_loss(self, drug_indices_global, cell_indices_global, labels):
-        drug_type_id = self.input_data.node_name2type[self.drug_type_name]
-        cell_type_id = self.input_data.node_name2type[self.cell_type_name]
-        drug_indices_local = [self.dl.nodes['type_map'][g_idx][1] for g_idx in drug_indices_global.tolist()]
-        cell_indices_local = [self.dl.nodes['type_map'][g_idx][1] for g_idx in cell_indices_global.tolist()]
-        drug_embeds = self.node_het_agg(drug_indices_local, drug_type_id)
-        cell_embeds = self.node_het_agg(cell_indices_local, cell_type_id)
-        scores = self.lp_bilinear(drug_embeds, cell_embeds).squeeze(-1)
-        return F.binary_cross_entropy_with_logits(scores, labels.float())
+            drug_type_id = self.input_data.node_name2type[self.drug_type_name]
+            cell_type_id = self.input_data.node_name2type[self.cell_type_name]
+
+            drug_indices_local = [self.dl.nodes['type_map'][g_idx][1] for g_idx in drug_indices_global.tolist()]
+            cell_indices_local = [self.dl.nodes['type_map'][g_idx][1] for g_idx in cell_indices_global.tolist()]
+
+            # Use the new helper to get combined embeddings
+            drug_embeds_combined = self.get_combined_embedding(drug_indices_local, drug_type_id)
+            cell_embeds_combined = self.get_combined_embedding(cell_indices_local, cell_type_id)
+            
+            scores = self.lp_bilinear(drug_embeds_combined, cell_embeds_combined).squeeze(-1)
+            return F.binary_cross_entropy_with_logits(scores, labels.float())
 
     def conteng_agg(self, local_id_batch, node_type):
         if not local_id_batch:
@@ -188,17 +273,34 @@ class HetAgg(nn.Module):
     def forward(self, triple_list_batch, triple_pair):
         return self.aggregate_all(triple_list_batch, triple_pair)
 
+    # def link_prediction_forward(self, drug_indices_global, cell_indices_global): #this is the original function
+    #     if self.lp_bilinear is None:
+    #         raise RuntimeError("Link prediction layers not initialized.")
+    #     drug_type_id = self.input_data.node_name2type[self.drug_type_name]
+    #     cell_type_id = self.input_data.node_name2type[self.cell_type_name]
+    #     drug_indices_local = [self.dl.nodes['type_map'][g_idx][1] for g_idx in drug_indices_global.tolist()]
+    #     cell_indices_local = [self.dl.nodes['type_map'][g_idx][1] for g_idx in cell_indices_global.tolist()]
+    #     drug_embeds = self.node_het_agg(drug_indices_local, drug_type_id)
+    #     cell_embeds = self.node_het_agg(cell_indices_local, cell_type_id)
+    #     scores = self.lp_bilinear(drug_embeds, cell_embeds).squeeze(-1)
+    #     return torch.sigmoid(scores)
+
     def link_prediction_forward(self, drug_indices_global, cell_indices_global):
-        if self.lp_bilinear is None:
-            raise RuntimeError("Link prediction layers not initialized.")
-        drug_type_id = self.input_data.node_name2type[self.drug_type_name]
-        cell_type_id = self.input_data.node_name2type[self.cell_type_name]
-        drug_indices_local = [self.dl.nodes['type_map'][g_idx][1] for g_idx in drug_indices_global.tolist()]
-        cell_indices_local = [self.dl.nodes['type_map'][g_idx][1] for g_idx in cell_indices_global.tolist()]
-        drug_embeds = self.node_het_agg(drug_indices_local, drug_type_id)
-        cell_embeds = self.node_het_agg(cell_indices_local, cell_type_id)
-        scores = self.lp_bilinear(drug_embeds, cell_embeds).squeeze(-1)
-        return torch.sigmoid(scores)
+            if self.lp_bilinear is None:
+                raise RuntimeError("Link prediction layers not initialized.")
+                
+            drug_type_id = self.input_data.node_name2type[self.drug_type_name]
+            cell_type_id = self.input_data.node_name2type[self.cell_type_name]
+            
+            drug_indices_local = [self.dl.nodes['type_map'][g_idx][1] for g_idx in drug_indices_global.tolist()]
+            cell_indices_local = [self.dl.nodes['type_map'][g_idx][1] for g_idx in cell_indices_global.tolist()]
+
+            # Use the new helper to get combined embeddings
+            drug_embeds_combined = self.get_combined_embedding(drug_indices_local, drug_type_id)
+            cell_embeds_combined = self.get_combined_embedding(cell_indices_local, cell_type_id)
+            
+            scores = self.lp_bilinear(drug_embeds_combined, cell_embeds_combined).squeeze(-1)
+            return torch.sigmoid(scores)
 
     def get_final_embeddings(self):
         final_embeds = {}

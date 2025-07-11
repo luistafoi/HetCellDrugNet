@@ -282,7 +282,7 @@ if __name__ == '__main__':
     model.setup_link_prediction(drug_type_name=drug_type_name, cell_type_name=cell_type_name)
     
     # Optimizer now only takes the model's parameters
-    optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=0)
+    optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     
     best_valid_auc, best_epoch, best_model_state = 0.0, 0, None
     patience, patience_counter = 50, 0
